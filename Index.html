@@ -1,0 +1,517 @@
+// --- BIẾN TRẠNG THÁI HỆ THỐNG ---
+let currentSessionCode = "";
+let currentStudent = { name: "", class: "", code: "" };
+let timerInterval = null;
+let timeLeft = 50 * 60; // 50 phút
+let studentAnswers = {};
+let reviewStatus = {};
+let currentPartIndex = 0;
+let currentQuestionIndex = 0;
+let studentAttempts = [];
+
+// Khởi tạo trạng thái mặc định
+function initStudentState() {
+  studentAnswers = {};
+  reviewStatus = {};
+  EXAM.parts.forEach(part => {
+    part.questions.forEach(q => {
+      if (part.type === "multiple_choice_single_answer") {
+        studentAnswers[q.id] = null;
+      } else if (part.type === "true_false") {
+        studentAnswers[q.id] = { a: null, b: null, c: null, d: null };
+      } else if (part.type === "short_answer" || q.type === "mixed_short_answer_constructed_response") {
+        studentAnswers[q.id] = "";
+      }
+      reviewStatus[q.id] = false;
+    });
+  });
+}
+
+// --- ĐIỀU HƯỚNG MÀN HÌNH ---
+function showScreen(screenId) {
+  ["home", "examScreen", "submitted", "teacher"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.add("hidden");
+  });
+  const target = document.getElementById(screenId);
+  if (target) target.classList.remove("hidden");
+}
+
+function goHome() {
+  if (!document.getElementById("examScreen").classList.contains("hidden")) {
+    if (!confirm("Bạn đang trong phòng thi! Thoát ra sẽ kết thúc bài thi. Bạn có muốn nộp bài không?")) {
+      return;
+    }
+    submitExam(true);
+    return;
+  }
+  showScreen("home");
+}
+
+// --- LUỒNG HỌC SINH ---
+function showStudentStart() {
+  const form = document.getElementById("studentStart");
+  if (form) form.classList.toggle("hidden");
+}
+
+function studentEnterExam() {
+  const name = document.getElementById("stuName").value.trim();
+  const stuClass = document.getElementById("stuClass").value.trim();
+  const code = document.getElementById("studentStartCode").value.trim();
+
+  if (!name || !stuClass || !code) {
+    alert("Vui lòng nhập đầy đủ Họ tên, Lớp và Mã ca thi!");
+    return;
+  }
+
+  if (currentSessionCode && code !== currentSessionCode) {
+    alert("Mã ca thi không chính xác hoặc đã hết hạn!");
+    return;
+  }
+
+  currentStudent = { name, class: stuClass, code };
+  initStudentState();
+  showScreen("examScreen");
+  renderNavigation();
+  renderQuestion(0, 0);
+  startTimer();
+}
+
+// Đồng hồ đếm ngược
+function startTimer() {
+  timeLeft = 50 * 60;
+  updateTimerDisplay();
+  if (timerInterval) clearInterval(timerInterval);
+  timerInterval = setInterval(() => {
+    timeLeft--;
+    updateTimerDisplay();
+    if (timeLeft <= 0) {
+      clearInterval(timerInterval);
+      alert("Hết giờ làm bài! Hệ thống tự động thu bài.");
+      submitExam(true);
+    }
+  }, 1000);
+}
+
+function updateTimerDisplay() {
+  const timerEl = document.getElementById("timer");
+  if (!timerEl) return;
+  const m = Math.floor(timeLeft / 60).toString().padStart(2, "0");
+  const s = (timeLeft % 60).toString().padStart(2, "0");
+  timerEl.textContent = `${m}:${s}`;
+}
+
+// Kiểm tra câu hỏi đã làm chưa
+function isQuestionAnswered(qId) {
+  const ans = studentAnswers[qId];
+  if (ans === null || ans === undefined || ans === "") return false;
+  if (typeof ans === "object") {
+    return Object.values(ans).some(val => val !== null);
+  }
+  return true;
+}
+
+// Render lưới câu hỏi bên sidebar
+function renderNavigation() {
+  const navEl = document.getElementById("studentNav");
+  if (!navEl) return;
+  navEl.innerHTML = "";
+
+  let globalIndex = 1;
+  EXAM.parts.forEach((part, pIdx) => {
+    const label = document.createElement("div");
+    label.className = "part-label";
+    label.textContent = part.part_id === "P1" ? "Phần I (1 - 18)" : (part.part_id === "P2" ? "Phần II (19 - 22)" : "Phần III (23 - 28)");
+    navEl.appendChild(label);
+
+    const grid = document.createElement("div");
+    grid.className = "qnav";
+
+    part.questions.forEach((q, qIdx) => {
+      const btn = document.createElement("button");
+      btn.className = "qnum";
+      btn.textContent = globalIndex++;
+
+      const isCurrent = pIdx === currentPartIndex && qIdx === currentQuestionIndex;
+      const answered = isQuestionAnswered(q.id);
+      const isReview = reviewStatus[q.id];
+
+      if (isCurrent) btn.classList.add("active");
+      else if (answered) btn.classList.add("done");
+      if (isReview) btn.classList.add("review");
+
+      btn.onclick = () => renderQuestion(pIdx, qIdx);
+      grid.appendChild(btn);
+    });
+
+    navEl.appendChild(grid);
+  });
+}
+
+// Hiển thị nội dung câu hỏi
+function renderQuestion(pIdx, qIdx) {
+  currentPartIndex = pIdx;
+  currentQuestionIndex = qIdx;
+  renderNavigation();
+
+  const container = document.getElementById("studentQuestion");
+  const part = EXAM.parts[pIdx];
+  const q = part.questions[qIdx];
+  if (!container || !q) return;
+
+  let html = `
+    <div class="qhead">
+      <div class="qtitle">${q.source_label} (${part.part_id})</div>
+      <div class="tag">${part.type === "multiple_choice_single_answer" ? "Trắc nghiệm nhiều lựa chọn" : (part.type === "true_false" ? "Trắc nghiệm Đúng - Sai" : "Trả lời ngắn")}</div>
+    </div>
+    <div class="qbody">
+      <div>${q.question_original.replace(/\n/g, "<br>")}</div>
+  `;
+
+  // Render bảng nếu có
+  if (q.tables && q.tables.length > 0) {
+    q.tables.forEach(table => {
+      html += `<table class="exam-table"><thead><tr>`;
+      table.headers.forEach(h => html += `<th>${h}</th>`);
+      html += `</tr></thead><tbody>`;
+      table.rows.forEach(r => {
+        html += `<tr>`;
+        r.forEach(c => html += `<td>${c}</td>`);
+        html += `</tr>`;
+      });
+      html += `</tbody></table>`;
+    });
+  }
+
+  // Render ảnh đính kèm nếu có
+  if (q.image_refs && q.image_refs.length > 0) {
+    q.image_refs.forEach(ref => {
+      if (typeof ASSETS !== "undefined" && ASSETS[ref]) {
+        html += `<img src="${ASSETS[ref]}" alt="Hình minh họa" class="asset">`;
+      }
+    });
+  }
+
+  // Tùy theo loại câu hỏi để render phương án
+  if (part.type === "multiple_choice_single_answer") {
+    html += `<div style="margin-top:14px;">`;
+    q.options.forEach(opt => {
+      const checked = studentAnswers[q.id] === opt.label ? "checked" : "";
+      html += `
+        <label class="option">
+          <input type="radio" name="ans_${q.id}" value="${opt.label}" ${checked} onchange="setSingleAnswer('${q.id}', '${opt.label}')">
+          <b>${opt.label}.</b> ${opt.text_original}
+        </label>
+      `;
+    });
+    html += `</div>`;
+  } else if (part.type === "true_false") {
+    html += `<div style="margin-top:14px;">`;
+    q.statements.forEach(st => {
+      const currentChoice = studentAnswers[q.id] ? studentAnswers[q.id][st.label] : null;
+      html += `
+        <div class="tfrow">
+          <div><b>${st.label})</b> ${st.text_original}</div>
+          <div class="tfchoice">
+            <label><input type="radio" name="tf_${q.id}_${st.label}" value="Đúng" ${currentChoice === "Đúng" ? "checked" : ""} onchange="setTFAnswer('${q.id}', '${st.label}', 'Đúng')"> Đúng</label>
+          </div>
+          <div class="tfchoice">
+            <label><input type="radio" name="tf_${q.id}_${st.label}" value="Sai" ${currentChoice === "Sai" ? "checked" : ""} onchange="setTFAnswer('${q.id}', '${st.label}', 'Sai')"> Sai</label>
+          </div>
+        </div>
+      `;
+    });
+    html += `</div>`;
+  } else if (part.type === "short_answer" || q.type === "mixed_short_answer_constructed_response") {
+    html += `
+      <div style="margin-top:16px;">
+        <label style="font-weight:800; display:block; margin-bottom:6px;">Đáp số của bạn:</label>
+        <input type="text" class="short" id="short_val_${q.id}" value="${studentAnswers[q.id] || ""}" placeholder="Nhập kết quả..." oninput="setShortAnswer('${q.id}', this.value)">
+      </div>
+    `;
+  }
+
+  // Thanh điều khiển câu trước/sau & Đánh dấu xem lại
+  const hasPrev = !(pIdx === 0 && qIdx === 0);
+  const hasNext = !(pIdx === EXAM.parts.length - 1 && qIdx === part.questions.length - 1);
+  const isReviewed = reviewStatus[q.id];
+
+  html += `
+    </div>
+    <div class="qactions">
+      <div class="g">
+        <button class="btn btn-soft" ${hasPrev ? "" : "disabled"} onclick="navigateQuestion(-1)">Câu trước</button>
+        <button class="btn btn-soft" ${hasNext ? "" : "disabled"} onclick="navigateQuestion(1)">Câu sau</button>
+      </div>
+      <div class="g">
+        <button class="btn ${isReviewed ? 'btn-primary' : 'btn-soft'}" onclick="toggleReview('${q.id}')">
+          ${isReviewed ? "★ Bỏ xem lại" : "☆ Xem lại sau"}
+        </button>
+      </div>
+    </div>
+  `;
+
+  container.innerHTML = html;
+
+  // Render lại công thức MathJax sau khi cập nhật DOM
+  if (window.MathJax && window.MathJax.typesetPromise) {
+    window.MathJax.typesetPromise([container]);
+  }
+}
+
+// Ghi nhận câu trả lời
+function setSingleAnswer(qId, val) {
+  studentAnswers[qId] = val;
+  renderNavigation();
+}
+
+function setTFAnswer(qId, subLabel, val) {
+  if (!studentAnswers[qId]) studentAnswers[qId] = {};
+  studentAnswers[qId][subLabel] = val;
+  renderNavigation();
+}
+
+function setShortAnswer(qId, val) {
+  studentAnswers[qId] = val.trim();
+  renderNavigation();
+}
+
+function toggleReview(qId) {
+  reviewStatus[qId] = !reviewStatus[qId];
+  renderQuestion(currentPartIndex, currentQuestionIndex);
+}
+
+// Chuyển câu qua lại
+function navigateQuestion(step) {
+  let p = currentPartIndex;
+  let q = currentQuestionIndex + step;
+
+  if (q >= EXAM.parts[p].questions.length) {
+    if (p < EXAM.parts.length - 1) {
+      p++;
+      q = 0;
+    }
+  } else if (q < 0) {
+    if (p > 0) {
+      p--;
+      q = EXAM.parts[p].questions.length - 1;
+    }
+  }
+
+  renderQuestion(p, q);
+}
+
+// Popup xác nhận nộp bài
+function confirmSubmit() {
+  const modal = document.getElementById("submitModal");
+  if (modal) modal.classList.remove("hidden");
+}
+
+function closeSubmit() {
+  const modal = document.getElementById("submitModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+// Thuật toán chấm điểm theo chuẩn cấu trúc đề Bộ GD&ĐT
+function calculateScore() {
+  let scoreP1 = 0;
+  let scoreP2 = 0;
+  let scoreP3 = 0;
+
+  EXAM.parts.forEach(part => {
+    if (part.part_id === "P1") {
+      part.questions.forEach(q => {
+        if (studentAnswers[q.id] === q.answer) {
+          scoreP1 += 0.25;
+        }
+      });
+    } else if (part.part_id === "P2") {
+      part.questions.forEach(q => {
+        let correctCount = 0;
+        const sAns = studentAnswers[q.id] || {};
+        ["a", "b", "c", "d"].forEach(key => {
+          if (sAns[key] && sAns[key] === q.answer[key]) {
+            correctCount++;
+          }
+        });
+
+        // Barem trúng ý Phần II: 1 ý = 0.1, 2 ý = 0.25, 3 ý = 0.5, 4 ý = 1.0
+        if (correctCount === 1) scoreP2 += 0.1;
+        else if (correctCount === 2) scoreP2 += 0.25;
+        else if (correctCount === 3) scoreP2 += 0.5;
+        else if (correctCount === 4) scoreP2 += 1.0;
+      });
+    } else if (part.part_id === "P3") {
+      part.questions.forEach(q => {
+        const uAns = (studentAnswers[q.id] || "").trim().replace(",", ".");
+        const accepted = (q.accepted_answers || [q.answer]).map(a => a.toString().trim().replace(",", "."));
+        if (accepted.includes(uAns)) {
+          scoreP3 += 0.25;
+        }
+      });
+    }
+  });
+
+  const total = Number((scoreP1 + scoreP2 + scoreP3).toFixed(2));
+  return { scoreP1, scoreP2, scoreP3, total };
+}
+
+function submitExam(force = false) {
+  closeSubmit();
+  if (timerInterval) clearInterval(timerInterval);
+
+  const result = calculateScore();
+  const attempt = {
+    ...currentStudent,
+    submittedAt: new Date().toLocaleTimeString(),
+    ...result
+  };
+  studentAttempts.push(attempt);
+
+  showScreen("submitted");
+}
+
+// --- LUỒNG GIÁO VIÊN ---
+function openTeacherLogin() {
+  const modal = document.getElementById("teacherLoginModal");
+  if (modal) modal.classList.remove("hidden");
+}
+
+function closeTeacherLogin() {
+  const modal = document.getElementById("teacherLoginModal");
+  if (modal) modal.classList.add("hidden");
+}
+
+function teacherLogin() {
+  const pass = document.getElementById("teacherPass").value;
+  if (pass === "A12345") {
+    closeTeacherLogin();
+    showScreen("teacher");
+    teacherTab("preview");
+  } else {
+    alert("Sai passcode đăng nhập!");
+  }
+}
+
+function teacherLogout() {
+  showScreen("home");
+}
+
+function teacherCreateSessionCode() {
+  const randomCode = Math.floor(100000 + Math.random() * 900000).toString();
+  currentSessionCode = randomCode;
+  document.getElementById("teacherStartCode").textContent = randomCode;
+  document.getElementById("teacherStartCodeBox").classList.remove("hidden");
+}
+
+function teacherTab(tabName) {
+  ["preview", "attempts", "settings"].forEach(t => {
+    const pane = document.getElementById(`teacher${t.charAt(0).toUpperCase() + t.slice(1)}Pane`);
+    const btn = document.getElementById(`tab${t.charAt(0).toUpperCase() + t.slice(1)}`);
+    if (pane) pane.classList.add("hidden");
+    if (btn) btn.classList.remove("active");
+  });
+
+  if (tabName === "preview") {
+    document.getElementById("teacherPreviewPane").classList.remove("hidden");
+    document.getElementById("tabPreview").classList.add("active");
+    renderTeacherPreview();
+  } else if (tabName === "attempts") {
+    document.getElementById("teacherAttemptsPane").classList.remove("hidden");
+    document.getElementById("tabAttempts").classList.add("active");
+    renderTeacherAttempts();
+  } else if (tabName === "settings") {
+    document.getElementById("teacherSettingsPane").classList.remove("hidden");
+    document.getElementById("tabSettings").classList.add("active");
+    renderTeacherSettings();
+  }
+}
+
+function renderTeacherPreview() {
+  const pane = document.getElementById("teacherPreviewPane");
+  if (!pane) return;
+  let html = `<h2>Toàn bộ đề thi & Đáp án chính thức</h2>`;
+
+  EXAM.parts.forEach(part => {
+    html += `<h3>${part.title_original}</h3>`;
+    part.questions.forEach(q => {
+      html += `
+        <div class="preview-q">
+          <div><b>${q.source_label}:</b> ${q.question_original}</div>
+          <div style="color:var(--ok); font-weight:bold; margin-top:5px;">
+            Đáp án: ${typeof q.answer === 'object' ? JSON.stringify(q.answer) : q.answer}
+          </div>
+          <div class="mini"><em>Giải thích: ${q.answer_explanation || 'Đã chuẩn hóa.'}</em></div>
+        </div>
+      `;
+    });
+  });
+  pane.innerHTML = html;
+
+  if (window.MathJax && window.MathJax.typesetPromise) {
+    window.MathJax.typesetPromise([pane]);
+  }
+}
+
+function renderTeacherAttempts() {
+  const pane = document.getElementById("teacherAttemptsPane");
+  if (!pane) return;
+
+  let html = `
+    <h2>Danh sách nộp bài</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Họ và tên</th>
+            <th>Lớp</th>
+            <th>Thời gian nộp</th>
+            <th>Phần I</th>
+            <th>Phần II</th>
+            <th>Phần III</th>
+            <th>Tổng điểm</th>
+          </tr>
+        </thead>
+        <tbody>
+  `;
+
+  if (studentAttempts.length === 0) {
+    html += `<tr><td colspan="7" style="text-align:center;">Chưa có học sinh nào nộp bài</td></tr>`;
+  } else {
+    studentAttempts.forEach(att => {
+      html += `
+        <tr>
+          <td><b>${att.name}</b></td>
+          <td>${att.class}</td>
+          <td>${att.submittedAt}</td>
+          <td>${att.scoreP1}</td>
+          <td>${att.scoreP2}</td>
+          <td>${att.scoreP3}</td>
+          <td><span class="badge badge-ok">${att.total} / 10</span></td>
+        </tr>
+      `;
+    });
+  }
+
+  html += `</tbody></table></div>`;
+  pane.innerHTML = html;
+}
+
+function renderTeacherSettings() {
+  const pane = document.getElementById("teacherSettingsPane");
+  if (!pane) return;
+  pane.innerHTML = `
+    <h2>Cài đặt ca thi</h2>
+    <div class="field" style="margin-bottom:12px;">
+      <label>Thời gian làm bài (phút)</label>
+      <input type="number" value="50" disabled style="background:#f4f7fb;">
+    </div>
+    <div class="field">
+      <label>Đảo câu hỏi/phương án</label>
+      <select disabled style="background:#f4f7fb;">
+        <option>Bật (Theo quy tắc SBD)</option>
+      </select>
+    </div>
+  `;
+}
+      
